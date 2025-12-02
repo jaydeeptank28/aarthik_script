@@ -57,22 +57,22 @@ async function insertBatch(batch) {
 
         const query = `
         INSERT INTO ats_uploaded_contacts
-        (name, email, phone, area, city, state, zip,
+        (name, email, phone, area, city, state, zip, address,
          is_converted_to_prospect, is_converted_to_lead, prospect_status,
          status_id, assign_to, lead_type, company_name, position, additional_info)
         VALUES 
         ${batch.map((_, i) => {
-            const base = i * 16;
+            const base = i * 17;
             return `(
-                $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7},
-                $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13},
-                $${base + 14}, $${base + 15}, $${base + 16}
+                $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8},
+                $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13},
+                $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}
             )`;
         }).join(",")}
         `;
 
         const values = batch.flatMap(r => [
-            r.name, r.email, r.phone, r.area, r.city, r.state, r.zip,
+            r.name, r.email, r.phone, r.area, r.city, r.state, r.zip, r.address,
             false, false, null,
             4, null, "sales", null, null,
             r.additional_info
@@ -163,7 +163,7 @@ async function importFile(filePath, fileName) {
             continue;
         }
 
-        const skip = ["name", "email", "phone", "area", "city", "state", "zip"];
+        const skip = ["name", "email", "phone", "area", "city", "state", "zip", "address"];
 
         let insertedCount = 0;
         let failedRows = [];
@@ -196,6 +196,7 @@ async function importFile(filePath, fileName) {
                 city: row.city || null,
                 state: row.state || null,
                 zip: row.zip || null,
+                address: row.address || null,
                 additional_info: buildAdditionalInfo(row, skip)
             });
 
