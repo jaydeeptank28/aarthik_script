@@ -183,12 +183,6 @@ async function importFile(filePath, fileName) {
                 continue;
             }
 
-            const isDuplicate = await findDuplicateByPhone(row.phone);
-            if (isDuplicate) {
-                failedRows.push({ row: index, reason: "Duplicate phone" });
-                continue;
-            }
-
             batch.push({
                 name: row.name,
                 email: row.email || null,
