@@ -213,35 +213,55 @@ async function importFile(filePath, logId) {
     };
 }
 
-app.post("/api/import-file", upload.single("file"), async (req, res) => {
+app.post("/api/import-files", upload.array("files", 50), async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ success: false, error: "No file uploaded" });
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ success: false, error: "No files uploaded" });
         }
 
-        const fileName = req.file.originalname;
-        const filePath = req.file.path;
+        let results = [];
 
-        const logId = await createLog(fileName);
+        for (const file of req.files) {
+            const fileName = file.originalname;
+            const filePath = file.path;
 
-        const result = await importFile(filePath, logId);
+            const logId = await createLog(fileName);
 
-        fs.unlinkSync(filePath);
+            const result = await importFile(filePath, logId);
 
-        if (result.stop) {
-            return res.status(400).json({ success: false, error: result.error });
+            fs.unlinkSync(filePath);
+
+            if (result.stop) {
+                results.push({
+                    file: fileName,
+                    success: false,
+                    error: result.error,
+                    log_id: logId
+                });
+                continue;
+            }
+
+            results.push({
+                file: fileName,
+                success: true,
+                stats: result,
+                log_id: logId
+            });
         }
 
         return res.json({
             success: true,
-            message: "File imported successfully",
-            stats: result,
-            log_id: logId
+            message: "All files processed",
+            files: results
         });
 
     } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+        return res.status(500).json({
+            success: false,
+            error: err.message
+        });
     }
 });
+
 
 app.listen(4000, () => console.log("Server running on 4000"));
