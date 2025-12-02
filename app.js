@@ -17,10 +17,8 @@ const db = new Pool({
 
 const upload = multer({ dest: "uploads/" });
 
-function readExcel(filePath) {
-    const workbook = XLSX.readFile(filePath);
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(sheet);
+function readWorkbook(filePath) {
+    return XLSX.readFile(filePath);
 }
 
 function toCamelCase(str) {
@@ -28,11 +26,8 @@ function toCamelCase(str) {
         .toLowerCase()
         .split(/[^a-zA-Z0-9]+/)
         .filter(Boolean)
-        .map((word, index) => {
-            if (index === 0) return word;
-            return word.charAt(0).toUpperCase() + word.slice(1);
-        })
-        .join('');
+        .map((word, index) => (index === 0 ? word : word[0].toUpperCase() + word.slice(1)))
+        .join("");
 }
 
 function buildAdditionalInfo(row, skip) {
@@ -93,11 +88,11 @@ async function insertBatch(batch) {
     }
 }
 
-async function createLog(fileName) {
+async function createLog(fileName, sheetName) {
     const result = await db.query(
-        `INSERT INTO import_logs (file_name, start_time, status)
-         VALUES ($1, NOW(), 'pending') RETURNING id`,
-        [fileName]
+        `INSERT INTO import_logs (file_name, sheet_name, start_time, status)
+         VALUES ($1, $2, NOW(), 'pending') RETURNING id`,
+        [fileName, sheetName]
     );
     return result.rows[0].id;
 }
@@ -122,95 +117,125 @@ async function updateLog(logId, stats, status) {
     );
 }
 
-async function importFile(filePath, logId) {
-    const rows = readExcel(filePath);
+async function importFile(filePath, fileName) {
+    const workbook = readWorkbook(filePath);
+    let sheetResults = [];
 
-    if (!rows.length) {
-        await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
-        return { stop: true, error: "Empty file. No rows found." };
-    }
+    for (const sheetName of workbook.SheetNames) {
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet);
 
-    const firstRow = rows[0];
-    const headers = Object.keys(firstRow).map(h => h.toLowerCase().trim());
+        // Create sheet log
+        const logId = await createLog(fileName, sheetName);
 
-    const required = ["name", "phone"];
-    const missing = required.filter(col => !headers.includes(col));
+        if (!rows.length) {
+            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
 
-    if (missing.length > 0) {
-        await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
-        return { stop: true, error: `Missing required columns: ${missing.join(", ")}` };
-    }
+            sheetResults.push({
+                sheet: sheetName,
+                success: false,
+                error: "Empty sheet",
+                log_id: logId
+            });
 
-    const skip = ["name", "email", "phone", "area", "city", "state", "zip"];
-
-    let insertedCount = 0;
-    let failedRows = [];
-    let totalCount = rows.length;
-
-    const batch = [];
-    let index = 0;
-
-    for (const r of rows) {
-        index++;
-
-        const row = {};
-        for (const k in r) row[k.toLowerCase().trim()] = r[k];
-
-        if (!row.name) {
-            failedRows.push({ row: index, reason: "Missing name" });
             continue;
         }
 
-        if (!row.phone) {
-            failedRows.push({ row: index, reason: "Missing phone" });
+        const headers = Object.keys(rows[0]).map(h => h.toLowerCase().trim());
+        const required = ["name", "phone"];
+        const missing = required.filter(col => !headers.includes(col));
+
+        if (missing.length > 0) {
+            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
+
+            sheetResults.push({
+                sheet: sheetName,
+                success: false,
+                error: `Missing required columns: ${missing.join(", ")}`,
+                log_id: logId
+            });
+
             continue;
         }
 
-        const isDuplicate = await findDuplicateByPhone(row.phone);
-        if (isDuplicate) {
-            failedRows.push({ row: index, reason: "Duplicate phone" });
-            continue;
+        const skip = ["name", "email", "phone", "area", "city", "state", "zip"];
+
+        let insertedCount = 0;
+        let failedRows = [];
+        let totalCount = rows.length;
+
+        const batch = [];
+        let index = 0;
+
+        for (const r of rows) {
+            index++;
+
+            const row = {};
+            for (const k in r) row[k.toLowerCase().trim()] = r[k];
+
+            if (!row.name) {
+                failedRows.push({ row: index, reason: "Missing name" });
+                continue;
+            }
+
+            if (!row.phone) {
+                failedRows.push({ row: index, reason: "Missing phone" });
+                continue;
+            }
+
+            const isDuplicate = await findDuplicateByPhone(row.phone);
+            if (isDuplicate) {
+                failedRows.push({ row: index, reason: "Duplicate phone" });
+                continue;
+            }
+
+            batch.push({
+                name: row.name,
+                email: row.email || null,
+                phone: row.phone,
+                area: row.area || null,
+                city: row.city || null,
+                state: row.state || null,
+                zip: row.zip || null,
+                additional_info: buildAdditionalInfo(row, skip)
+            });
+
+            if (batch.length === 1000) {
+                await insertBatch(batch);
+                insertedCount += batch.length;
+                batch.length = 0;
+            }
         }
 
-        batch.push({
-            name: row.name,
-            email: row.email || null,
-            phone: row.phone,
-            area: row.area || null,
-            city: row.city || null,
-            state: row.state || null,
-            zip: row.zip || null,
-            additional_info: buildAdditionalInfo(row, skip)
-        });
-
-        if (batch.length === 1000) {
+        if (batch.length) {
             await insertBatch(batch);
             insertedCount += batch.length;
-            batch.length = 0;
         }
+
+        await updateLog(
+            logId,
+            {
+                total_rows: totalCount,
+                inserted_rows: insertedCount,
+                failed_rows: failedRows.length
+            },
+            "complete"
+        );
+
+        sheetResults.push({
+            sheet: sheetName,
+            success: true,
+            stats: {
+                total_rows: totalCount,
+                inserted_rows: insertedCount,
+                failed_rows: failedRows.length,
+                failed_details: failedRows
+            },
+            log_id: logId
+        });
     }
 
-    if (batch.length) {
-        await insertBatch(batch);
-        insertedCount += batch.length;
-    }
-
-    await updateLog(
-        logId,
-        {
-            total_rows: totalCount,
-            inserted_rows: insertedCount,
-            failed_rows: failedRows.length
-        },
-        "complete"
-    );
-
-    return {
-        total_rows: totalCount,
-        inserted_rows: insertedCount,
-        failed_rows: failedRows.length,
-        failed_details: failedRows
-    };
+    return sheetResults;
 }
 
 app.post("/api/import-files", upload.array("files", 50), async (req, res) => {
@@ -225,27 +250,13 @@ app.post("/api/import-files", upload.array("files", 50), async (req, res) => {
             const fileName = file.originalname;
             const filePath = file.path;
 
-            const logId = await createLog(fileName);
-
-            const result = await importFile(filePath, logId);
+            const sheetResults = await importFile(filePath, fileName);
 
             fs.unlinkSync(filePath);
 
-            if (result.stop) {
-                results.push({
-                    file: fileName,
-                    success: false,
-                    error: result.error,
-                    log_id: logId
-                });
-                continue;
-            }
-
             results.push({
                 file: fileName,
-                success: true,
-                stats: result,
-                log_id: logId
+                sheets: sheetResults
             });
         }
 
