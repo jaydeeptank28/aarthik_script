@@ -7,7 +7,6 @@ const { Pool } = require("pg");
 const app = express();
 app.use(express.json());
 
-// ---------------- DB CONNECTION ----------------
 const db = new Pool({
     host: "localhost",
     port: 5432,
@@ -16,17 +15,14 @@ const db = new Pool({
     database: "aarthik_script"
 });
 
-// ---------------- FILE UPLOAD ----------------
 const upload = multer({ dest: "uploads/" });
 
-// ---------------- HELPER: Read Excel ----------------
 function readExcel(filePath) {
     const workbook = XLSX.readFile(filePath);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     return XLSX.utils.sheet_to_json(sheet);
 }
 
-// ---------------- HELPER: Build Additional Info ----------------
 function buildAdditionalInfo(row, skip) {
     const arr = [];
     for (const key in row) {
@@ -37,7 +33,6 @@ function buildAdditionalInfo(row, skip) {
     return arr.join(" | ");
 }
 
-// ---------------- MODEL: Duplicate Check ----------------
 async function findDuplicateByPhone(phone) {
     const result = await db.query(
         `SELECT id FROM ats_uploaded_contacts WHERE phone = $1 LIMIT 1`,
@@ -46,7 +41,6 @@ async function findDuplicateByPhone(phone) {
     return result.rows.length > 0;
 }
 
-// ---------------- MODEL: Batch Insert ----------------
 async function insertBatch(batch) {
     const client = await db.connect();
     try {
@@ -85,11 +79,40 @@ async function insertBatch(batch) {
     }
 }
 
-// ---------------- SERVICE: Import Logic ----------------
-async function importFile(filePath) {
+async function createLog(fileName) {
+    const result = await db.query(
+        `INSERT INTO import_logs (file_name, start_time, status)
+         VALUES ($1, NOW(), 'pending') RETURNING id`,
+        [fileName]
+    );
+    return result.rows[0].id;
+}
+
+async function updateLog(logId, stats, status) {
+    await db.query(
+        `UPDATE import_logs
+         SET end_time = NOW(),
+             total_rows = $1,
+             inserted_rows = $2,
+             failed_rows = $3,
+             status = $4,
+             total_seconds = EXTRACT(EPOCH FROM (NOW() - start_time))
+         WHERE id = $5`,
+        [
+            stats.total_rows,
+            stats.inserted_rows,
+            stats.failed_rows,
+            status,
+            logId
+        ]
+    );
+}
+
+async function importFile(filePath, logId) {
     const rows = readExcel(filePath);
 
     if (!rows.length) {
+        await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
         return { stop: true, error: "Empty file. No rows found." };
     }
 
@@ -100,6 +123,7 @@ async function importFile(filePath) {
     const missing = required.filter(col => !headers.includes(col));
 
     if (missing.length > 0) {
+        await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
         return { stop: true, error: `Missing required columns: ${missing.join(", ")}` };
     }
 
@@ -157,8 +181,17 @@ async function importFile(filePath) {
         insertedCount += batch.length;
     }
 
+    await updateLog(
+        logId,
+        {
+            total_rows: totalCount,
+            inserted_rows: insertedCount,
+            failed_rows: failedRows.length
+        },
+        "complete"
+    );
+
     return {
-        stop: false,
         total_rows: totalCount,
         inserted_rows: insertedCount,
         failed_rows: failedRows.length,
@@ -166,15 +199,19 @@ async function importFile(filePath) {
     };
 }
 
-// ---------------- CONTROLLER + ROUTE ----------------
 app.post("/api/import-file", upload.single("file"), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ success: false, error: "No file uploaded" });
         }
 
+        const fileName = req.file.originalname;
         const filePath = req.file.path;
-        const result = await importFile(filePath);
+
+        const logId = await createLog(fileName);
+
+        const result = await importFile(filePath, logId);
+
         fs.unlinkSync(filePath);
 
         if (result.stop) {
@@ -184,7 +221,8 @@ app.post("/api/import-file", upload.single("file"), async (req, res) => {
         return res.json({
             success: true,
             message: "File imported successfully",
-            stats: result
+            stats: result,
+            log_id: logId
         });
 
     } catch (err) {
@@ -192,5 +230,4 @@ app.post("/api/import-file", upload.single("file"), async (req, res) => {
     }
 });
 
-// ---------------- START SERVER ----------------
 app.listen(4000, () => console.log("Server running on 4000"));
