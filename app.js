@@ -97,7 +97,7 @@ async function createLog(fileName, sheetName) {
     return result.rows[0].id;
 }
 
-async function updateLog(logId, stats, status) {
+async function updateLog(logId, stats, status, totalMs) {
     await db.query(
         `UPDATE import_logs
          SET end_time = NOW(),
@@ -105,13 +105,14 @@ async function updateLog(logId, stats, status) {
              inserted_rows = $2,
              failed_rows = $3,
              status = $4,
-             total_seconds = EXTRACT(EPOCH FROM (NOW() - start_time))
-         WHERE id = $5`,
+             total_seconds = $5
+         WHERE id = $6`,
         [
             stats.total_rows,
             stats.inserted_rows,
             stats.failed_rows,
             status,
+            Math.round(totalMs / 1000),
             logId
         ]
     );
@@ -122,14 +123,17 @@ async function importFile(filePath, fileName) {
     let sheetResults = [];
 
     for (const sheetName of workbook.SheetNames) {
+
+        const sheetStart = Date.now();
+
         const sheet = workbook.Sheets[sheetName];
         const rows = XLSX.utils.sheet_to_json(sheet);
 
-        // Create sheet log
         const logId = await createLog(fileName, sheetName);
 
         if (!rows.length) {
-            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
+            const sheetEnd = Date.now();
+            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed", sheetEnd - sheetStart);
 
             sheetResults.push({
                 sheet: sheetName,
@@ -146,7 +150,8 @@ async function importFile(filePath, fileName) {
         const missing = required.filter(col => !headers.includes(col));
 
         if (missing.length > 0) {
-            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed");
+            const sheetEnd = Date.now();
+            await updateLog(logId, { total_rows: 0, inserted_rows: 0, failed_rows: 0 }, "failed", sheetEnd - sheetStart);
 
             sheetResults.push({
                 sheet: sheetName,
@@ -206,6 +211,8 @@ async function importFile(filePath, fileName) {
             insertedCount += batch.length;
         }
 
+        const sheetEnd = Date.now();
+
         await updateLog(
             logId,
             {
@@ -213,7 +220,8 @@ async function importFile(filePath, fileName) {
                 inserted_rows: insertedCount,
                 failed_rows: failedRows.length
             },
-            "complete"
+            "complete",
+            sheetEnd - sheetStart
         );
 
         sheetResults.push({
