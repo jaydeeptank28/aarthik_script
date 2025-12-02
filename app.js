@@ -23,12 +23,26 @@ function readExcel(filePath) {
     return XLSX.utils.sheet_to_json(sheet);
 }
 
+function toCamelCase(str) {
+    return str
+        .toLowerCase()
+        .split(/[^a-zA-Z0-9]+/)
+        .filter(Boolean)
+        .map((word, index) => {
+            if (index === 0) return word;
+            return word.charAt(0).toUpperCase() + word.slice(1);
+        })
+        .join('');
+}
+
 function buildAdditionalInfo(row, skip) {
     const arr = [];
     for (const key in row) {
         if (!row[key]) continue;
         if (skip.includes(key)) continue;
-        arr.push(`${key} : ${row[key]}`);
+
+        const camelKey = toCamelCase(key);
+        arr.push(`${camelKey} : ${row[key]}`);
     }
     return arr.join(" | ");
 }
@@ -55,9 +69,9 @@ async function insertBatch(batch) {
         ${batch.map((_, i) => {
             const base = i * 16;
             return `(
-                $${base+1}, $${base+2}, $${base+3}, $${base+4}, $${base+5}, $${base+6}, $${base+7},
-                $${base+8}, $${base+9}, $${base+10}, $${base+11}, $${base+12}, $${base+13},
-                $${base+14}, $${base+15}, $${base+16}
+                $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7},
+                $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13},
+                $${base + 14}, $${base + 15}, $${base + 16}
             )`;
         }).join(",")}
         `;
