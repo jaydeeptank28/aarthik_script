@@ -2,18 +2,17 @@ const express = require("express");
 const multer = require("multer");
 const XLSX = require("xlsx");
 const fs = require("fs");
-const mysql = require("mysql2/promise");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(express.json());
 
-const db = mysql.createPool({
+const db = new Pool({
     host: "localhost",
-    user: "root",
-    password: "1234",
-    database: "aarthik_script",
-    waitForConnections: true,
-    connectionLimit: 10
+    port: 5432,
+    user: "postgres",
+    password: "2628",
+    database: "aarthik_script"
 });
 
 const upload = multer({ dest: "uploads/" });
@@ -44,68 +43,70 @@ function buildAdditionalInfo(row, skip) {
 }
 
 async function findDuplicateByPhone(phone) {
-    const [rows] = await db.query(
-        `SELECT id FROM ats_uploaded_contacts WHERE phone = ? LIMIT 1`,
+    const result = await db.query(
+        `SELECT id FROM ats_uploaded_contacts WHERE phone = $1 LIMIT 1`,
         [phone]
     );
-    return rows.length > 0;
+    return result.rows.length > 0;
 }
 
 async function insertBatch(batch) {
-    const conn = await db.getConnection();
+    const client = await db.connect();
     try {
-        await conn.beginTransaction();
-
-        const placeholders = batch
-            .map(() => "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .join(",");
+        await client.query("BEGIN");
 
         const query = `
-            INSERT INTO ats_uploaded_contacts
-            (name, email, phone, area, city, state, zip, address,
-             is_converted_to_prospect, is_converted_to_lead, prospect_status,
-             status_id, assign_to, lead_type, company_name, position, additional_info)
-            VALUES ${placeholders}
+        INSERT INTO ats_uploaded_contacts
+        (name, email, phone, area, city, state, zip, address,
+         is_converted_to_prospect, is_converted_to_lead, prospect_status,
+         status_id, assign_to, lead_type, company_name, position, additional_info)
+        VALUES 
+        ${batch.map((_, i) => {
+            const base = i * 17;
+            return `(
+                $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8},
+                $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13},
+                $${base + 14}, $${base + 15}, $${base + 16}, $${base + 17}
+            )`;
+        }).join(",")}
         `;
 
         const values = batch.flatMap(r => [
             r.name, r.email, r.phone, r.area, r.city, r.state, r.zip, r.address,
-            0, 0, null,
+            false, false, null,
             4, null, "sales", null, null,
             r.additional_info
         ]);
 
-        await conn.query(query, values);
-
-        await conn.commit();
+        await client.query(query, values);
+        await client.query("COMMIT");
     } catch (err) {
-        await conn.rollback();
+        await client.query("ROLLBACK");
         throw err;
     } finally {
-        conn.release();
+        client.release();
     }
 }
 
 async function createLog(fileName, sheetName) {
-    const [result] = await db.query(
-        `INSERT INTO ats_upload_logs (file_name, sheet_name, start_time, status)
-         VALUES (?, ?, NOW(), 'pending')`,
+    const result = await db.query(
+        `INSERT INTO import_logs (file_name, sheet_name, start_time, status)
+         VALUES ($1, $2, NOW(), 'pending') RETURNING id`,
         [fileName, sheetName]
     );
-
-    return result.insertId;
+    return result.rows[0].id;
 }
 
 async function updateLog(logId, stats, status, totalMs) {
     await db.query(
-        `UPDATE ats_upload_logs
+        `UPDATE import_logs
          SET end_time = NOW(),
-             total_rows = ?,
-             inserted_rows = ?,
-             failed_rows = ?,
-             status = ?,
-             total_seconds = ?
-         WHERE id = ?`,
+             total_rows = $1,
+             inserted_rows = $2,
+             failed_rows = $3,
+             status = $4,
+             total_seconds = $5
+         WHERE id = $6`,
         [
             stats.total_rows,
             stats.inserted_rows,
